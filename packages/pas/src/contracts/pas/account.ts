@@ -10,7 +10,7 @@ import {
 	normalizeMoveArguments,
 	type RawTransactionArgument,
 } from '../utils/index.js';
-import { bcs } from '@mysten/sui/bcs';
+import { bcs, type BcsType } from '@mysten/sui/bcs';
 import { type Transaction, type TransactionArgument } from '@mysten/sui/transactions';
 import * as versioning from './versioning.js';
 const $moduleName = '@pas/pas::account';
@@ -339,5 +339,211 @@ export function syncVersioning(options: SyncVersioningOptions) {
 			module: 'account',
 			function: 'sync_versioning',
 			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+		});
+}
+export interface DepositObjectArguments<T extends BcsType<any>> {
+	account: RawTransactionArgument<string>;
+	obj: RawTransactionArgument<T>;
+}
+export interface DepositObjectOptions<T extends BcsType<any>> {
+	package?: string;
+	arguments:
+		| DepositObjectArguments<T>
+		| [account: RawTransactionArgument<string>, obj: RawTransactionArgument<T>];
+	typeArguments: [string];
+}
+/**
+ * Deposit an object into an account. The object becomes owned by the account's
+ * address, exactly like a balance deposit.
+ */
+export function depositObject<T extends BcsType<any>>(options: DepositObjectOptions<T>) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, `${options.typeArguments[0]}`] satisfies (string | null)[];
+	const parameterNames = ['account', 'obj'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'deposit_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
+export interface DepositObjectToOwnerArguments<T extends BcsType<any>> {
+	namespace: RawTransactionArgument<string>;
+	owner: RawTransactionArgument<string>;
+	obj: RawTransactionArgument<T>;
+}
+export interface DepositObjectToOwnerOptions<T extends BcsType<any>> {
+	package?: string;
+	arguments:
+		| DepositObjectToOwnerArguments<T>
+		| [
+				namespace: RawTransactionArgument<string>,
+				owner: RawTransactionArgument<string>,
+				obj: RawTransactionArgument<T>,
+		  ];
+	typeArguments: [string];
+}
+/**
+ * Deposit an object into `owner`'s account by deriving the account address from
+ * the namespace. Unlike `deposit_object`, this does NOT require the account to
+ * exist yet — the object lands at the derived account address and can be received
+ * once the owner creates their account (mirrors how `unsafe_send_*` delivers to
+ * not-yet-created accounts).
+ *
+ * This is the safe primitive for minting/airdropping: it keeps the destination
+ * derivation inside PAS so issuers can't accidentally send to a bare wallet
+ * address (which would put a freely-transferable object outside the closed loop).
+ */
+export function depositObjectToOwner<T extends BcsType<any>>(
+	options: DepositObjectToOwnerOptions<T>,
+) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, 'address', `${options.typeArguments[0]}`] satisfies (
+		| string
+		| null
+	)[];
+	const parameterNames = ['namespace', 'owner', 'obj'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'deposit_object_to_owner',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
+export interface UnlockObjectArguments {
+	account: RawTransactionArgument<string>;
+	auth: TransactionArgument;
+	receiving: TransactionArgument;
+}
+export interface UnlockObjectOptions {
+	package?: string;
+	arguments:
+		| UnlockObjectArguments
+		| [
+				account: RawTransactionArgument<string>,
+				auth: TransactionArgument,
+				receiving: TransactionArgument,
+		  ];
+	typeArguments: [string];
+}
+/**
+ * Enables an object unlock flow. Mirrors `unlock_balance`.
+ *
+ * This is useful for objects that are not managed by a Policy within the system,
+ * or if there's a special case where an issuer allows objects to flow out.
+ */
+export function unlockObject(options: UnlockObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null, null] satisfies (string | null)[];
+	const parameterNames = ['account', 'auth', 'receiving'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'unlock_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
+export interface SendObjectArguments {
+	from: RawTransactionArgument<string>;
+	auth: TransactionArgument;
+	to: RawTransactionArgument<string>;
+	receiving: TransactionArgument;
+}
+export interface SendObjectOptions {
+	package?: string;
+	arguments:
+		| SendObjectArguments
+		| [
+				from: RawTransactionArgument<string>,
+				auth: TransactionArgument,
+				to: RawTransactionArgument<string>,
+				receiving: TransactionArgument,
+		  ];
+	typeArguments: [string];
+}
+/** Initiate an object transfer from account A to account B. Mirrors `send_balance`. */
+export function sendObject(options: SendObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null, null, null] satisfies (string | null)[];
+	const parameterNames = ['from', 'auth', 'to', 'receiving'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'send_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
+export interface UnsafeSendObjectArguments {
+	from: RawTransactionArgument<string>;
+	auth: TransactionArgument;
+	recipientAddress: RawTransactionArgument<string>;
+	receiving: TransactionArgument;
+}
+export interface UnsafeSendObjectOptions {
+	package?: string;
+	arguments:
+		| UnsafeSendObjectArguments
+		| [
+				from: RawTransactionArgument<string>,
+				auth: TransactionArgument,
+				recipientAddress: RawTransactionArgument<string>,
+				receiving: TransactionArgument,
+		  ];
+	typeArguments: [string];
+}
+/**
+ * Transfer an object from account to an address. This unlocks transfers to an
+ * account before it has been created. Mirrors `unsafe_send_balance`.
+ *
+ * It's marked as `unsafe_` as it's easy to accidentally pick the wrong recipient.
+ */
+export function unsafeSendObject(options: UnsafeSendObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null, 'address', null] satisfies (string | null)[];
+	const parameterNames = ['from', 'auth', 'recipientAddress', 'receiving'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'unsafe_send_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
+export interface ClawbackObjectArguments {
+	from: RawTransactionArgument<string>;
+	receiving: TransactionArgument;
+}
+export interface ClawbackObjectOptions {
+	package?: string;
+	arguments:
+		| ClawbackObjectArguments
+		| [from: RawTransactionArgument<string>, receiving: TransactionArgument];
+	typeArguments: [string];
+}
+/**
+ * Initiate a clawback request for an object. Mirrors `clawback_balance`. Takes no
+ * `Auth`, as it's an admin action, and can only finalize if clawback is enabled in
+ * the policy.
+ */
+export function clawbackObject(options: ClawbackObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null] satisfies (string | null)[];
+	const parameterNames = ['from', 'receiving'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'account',
+			function: 'clawback_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
 		});
 }

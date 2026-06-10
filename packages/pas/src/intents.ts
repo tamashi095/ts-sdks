@@ -9,6 +9,7 @@ import type {
 	CallArg,
 	Command,
 	TransactionDataBuilder,
+	TransactionObjectArgument,
 	TransactionPlugin,
 	TransactionResult,
 } from '@mysten/sui/transactions';
@@ -67,11 +68,82 @@ type AccountForAddressIntentData = {
 	cfg: PASPackageConfig;
 };
 
+/**
+ * Identifies the object to move. On-chain this maps to a `Receiving<T>` (the object
+ * lives in the sender's account — you never hold it), so the SDK takes the matching
+ * object argument, exactly like any other Move-call object input:
+ *   - `tx.object(id)` — the build resolver marks it as `Receiving` from the Move signature;
+ *   - `tx.receivingRef({ objectId, version, digest })` — a fully-resolved receiving input.
+ *
+ * Must be a resolved object argument — thunk-style arguments (e.g. the result of
+ * `tx.add(...)`) can't be used, since the intent resolver runs on the transaction data
+ * rather than the `Transaction` itself.
+ */
+export type ReceivingObjectInput = TransactionObjectArgument;
+
+// Object intents mirror the balance ones, but identify a specific object by
+// reference (passed to the Move `*_object` functions as a `Receiving<T>`) instead
+// of an amount, and the asset type is the raw object type (not wrapped in `Balance<>`).
+
+type SendObjectIntentData = {
+	action: 'sendObject';
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+	cfg: PASPackageConfig;
+};
+
+type UnlockObjectIntentData = {
+	action: 'unlockObject';
+	from: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+	cfg: PASPackageConfig;
+};
+
+type UnlockUnrestrictedObjectIntentData = {
+	action: 'unlockUnrestrictedObject';
+	from: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+	cfg: PASPackageConfig;
+};
+
+// "Begin" intents resolve the accounts + `new_auth` + the `account::send_*` call and
+// return the raw `Request` hot potato as their output — running NO issuer templates and
+// NO `resolve_*`. The caller threads the request into a custom finalization (e.g. an
+// app-layer settlement pipeline). If they never resolve it, the Move hot-potato rule
+// makes `tx.build()` fail, exactly as intended.
+
+type BeginSendBalanceIntentData = {
+	action: 'beginSendBalance';
+	from: string;
+	to: string;
+	amount: string;
+	assetType: string;
+	cfg: PASPackageConfig;
+};
+
+type BeginSendObjectIntentData = {
+	action: 'beginSendObject';
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+	cfg: PASPackageConfig;
+};
+
 type PASIntentData =
 	| SendBalanceIntentData
 	| UnlockBalanceIntentData
 	| UnlockUnrestrictedBalanceIntentData
-	| AccountForAddressIntentData;
+	| AccountForAddressIntentData
+	| SendObjectIntentData
+	| UnlockObjectIntentData
+	| UnlockUnrestrictedObjectIntentData
+	| BeginSendBalanceIntentData
+	| BeginSendObjectIntentData;
 
 /**
  * Creates a memoized PAS intent closure. On first call it registers the
@@ -152,6 +224,84 @@ export function accountForAddressIntent(
 ): (owner: string) => (tx: Transaction) => TransactionResult {
 	return (owner: string) =>
 		createPASIntent({ action: 'accountForAddress', owner, cfg: packageConfig });
+}
+
+export function sendObjectIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, to, objectType, object }) =>
+		createPASIntent({ action: 'sendObject', from, to, objectType, object, cfg: packageConfig });
+}
+
+export function unlockObjectIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, objectType, object }) =>
+		createPASIntent({ action: 'unlockObject', from, objectType, object, cfg: packageConfig });
+}
+
+export function unlockUnrestrictedObjectIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, objectType, object }) =>
+		createPASIntent({
+			action: 'unlockUnrestrictedObject',
+			from,
+			objectType,
+			object,
+			cfg: packageConfig,
+		});
+}
+
+export function beginSendBalanceIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	to: string;
+	amount: number | bigint;
+	assetType: string;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, to, amount, assetType }) =>
+		createPASIntent({
+			action: 'beginSendBalance',
+			from,
+			to,
+			amount: String(amount),
+			assetType,
+			cfg: packageConfig,
+		});
+}
+
+export function beginSendObjectIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, to, objectType, object }) =>
+		createPASIntent({
+			action: 'beginSendObject',
+			from,
+			to,
+			objectType,
+			object,
+			cfg: packageConfig,
+		});
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +397,24 @@ class Resolver {
 			this.#inputCache.set(objectId, arg);
 		}
 		return arg;
+	}
+
+	/**
+	 * Build the `Receiving<T>` argument for an `account::*_object` call. A bare id
+	 * becomes an unresolved object input (the standard resolver fetches its ref and
+	 * recognises the `Receiving` position from the Move signature); a full object
+	 * reference is used directly, skipping that resolution.
+	 */
+	receivingArg(object: ReceivingObjectInput): Argument {
+		// A resolved object argument (e.g. tx.object(id) or tx.receivingRef(ref)). Thunk
+		// arguments can't be resolved here — the intent plugin operates on the
+		// TransactionData, not a Transaction.
+		if (typeof object === 'function') {
+			throw new PASClientError(
+				'sendObject/unlockObject `object` must be a resolved object argument (e.g. tx.object(id) or tx.receivingRef(ref)), not a thunk.',
+			);
+		}
+		return object as Argument;
 	}
 
 	addPureInput(key: string, value: ReturnType<typeof Inputs.Pure>): Argument {
@@ -582,6 +750,294 @@ class Resolver {
 		return { commands, resultOffset };
 	}
 
+	// -- Object builders ------------------------------------------------------
+	//
+	// Identical in shape to the balance builders, except: the policy is derived
+	// from the raw object type (no `Balance<>` wrap), the `account::*_object`
+	// call receives the object id as a `Receiving<T>` (the standard object
+	// resolver turns the object input into a `ReceivingRef` based on the Move
+	// signature), and the type argument is the unwrapped object type.
+
+	buildSendObject(data: SendObjectIntentData, baseIdx: number): BuildResult {
+		const { from, to, objectType, object } = data;
+		const fromAccountId = deriveAccountAddress(from, this.#config);
+		const toAccountId = deriveAccountAddress(to, this.#config);
+
+		const policyId = derivePolicyAddress(objectType, this.#config, { wrapType: (t) => t });
+		this.getObjectOrThrow(policyId, () => new PolicyNotFoundError(objectType));
+		const templateCmds = this.resolveTemplateCommands(policyId, 'send_funds');
+
+		const [toAccountArg, commands] = this.resolveAccountArg(toAccountId, to, baseIdx);
+		const [fromAccountArg, fromAccountCommands] = this.resolveAccountArg(
+			fromAccountId,
+			from,
+			baseIdx + commands.length,
+		);
+		commands.push(...fromAccountCommands);
+
+		const policyArg = this.addObjectInput(policyId);
+
+		// account::new_auth
+		const authIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'new_auth',
+			}),
+		);
+
+		// account::send_object
+		const requestIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'send_object',
+				arguments: [
+					fromAccountArg,
+					{ $kind: 'Result', Result: authIdx },
+					toAccountArg,
+					this.receivingArg(object),
+				],
+				typeArguments: [normalizeStructTag(objectType)],
+			}),
+		);
+		const requestArg: Argument = { $kind: 'Result', Result: requestIdx };
+
+		// Issuer-defined approval commands from templates.
+		const templateStartIdx = baseIdx + commands.length;
+		for (const templateCmd of templateCmds) {
+			commands.push(
+				buildMoveCallCommandFromTemplate(
+					templateCmd,
+					{
+						addInput: (type, arg) => this.addTemplateInput(type, arg),
+						senderAccount: fromAccountArg,
+						receiverAccount: toAccountArg,
+						policy: policyArg,
+						request: requestArg,
+					},
+					templateStartIdx,
+				),
+			);
+		}
+
+		// send_funds::resolve_object
+		const resultOffset = commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'send_funds',
+				function: 'resolve_object',
+				arguments: [requestArg, policyArg],
+				typeArguments: [normalizeStructTag(objectType)],
+			}),
+		);
+
+		return { commands, resultOffset };
+	}
+
+	/**
+	 * Object analog of `buildUnlockBalance`. Restricted unlock runs the issuer's
+	 * `unlock_funds` approval templates then `unlock_funds::resolve`; unrestricted
+	 * unlock (for object types with no Policy) calls `resolve_unrestricted_object`.
+	 */
+	buildUnlockObject(
+		data: UnlockObjectIntentData | UnlockUnrestrictedObjectIntentData,
+		baseIdx: number,
+	): BuildResult {
+		const { from, objectType, object } = data;
+		const fromAccountId = deriveAccountAddress(from, this.#config);
+		const policyId = derivePolicyAddress(objectType, this.#config, { wrapType: (t) => t });
+
+		const isRestricted = data.action === 'unlockObject';
+
+		if (isRestricted) {
+			this.getObjectOrThrow(
+				policyId,
+				() =>
+					new PASClientError(
+						`Policy does not exist for object type ${objectType}. ` +
+							`That means that the issuer has not yet enabled management for this object type. ` +
+							`If this is a non-managed object, you can use the unrestricted unlock flow by calling unlockUnrestrictedObject() instead.`,
+					),
+			);
+		} else {
+			if (this.objects.get(policyId) !== null) {
+				throw new PASClientError(
+					`A policy exists for object type ${objectType}. That means that the issuer has enabled management for this object type and you can no longer use the unrestricted unlock flow.`,
+				);
+			}
+		}
+
+		const [fromAccountArg, commands] = this.resolveAccountArg(fromAccountId, from, baseIdx);
+		const policyArg = isRestricted ? this.addObjectInput(policyId) : undefined;
+
+		// account::new_auth
+		const authIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'new_auth',
+			}),
+		);
+
+		// account::unlock_object
+		const requestIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'unlock_object',
+				arguments: [
+					fromAccountArg,
+					{ $kind: 'Result', Result: authIdx },
+					this.receivingArg(object),
+				],
+				typeArguments: [normalizeStructTag(objectType)],
+			}),
+		);
+		const requestArg: Argument = { $kind: 'Result', Result: requestIdx };
+
+		if (isRestricted) {
+			const templateCmds = this.resolveTemplateCommands(policyId, 'unlock_funds');
+			const templateStartIdx = baseIdx + commands.length;
+			for (const templateCmd of templateCmds) {
+				commands.push(
+					buildMoveCallCommandFromTemplate(
+						templateCmd,
+						{
+							addInput: (type, arg) => this.addTemplateInput(type, arg),
+							senderAccount: fromAccountArg,
+							policy: policyArg,
+							request: requestArg,
+						},
+						templateStartIdx,
+					),
+				);
+			}
+
+			// unlock_funds::resolve
+			const resultOffset = commands.length;
+			commands.push(
+				TransactionCommands.MoveCall({
+					package: this.#config.packageId,
+					module: 'unlock_funds',
+					function: 'resolve',
+					arguments: [requestArg, policyArg!],
+					typeArguments: [normalizeStructTag(objectType)],
+				}),
+			);
+			return { commands, resultOffset };
+		}
+
+		// unlock_funds::resolve_unrestricted_object
+		const resultOffset = commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'unlock_funds',
+				function: 'resolve_unrestricted_object',
+				arguments: [requestArg, this.addObjectInput(this.#config.namespaceId)],
+				typeArguments: [normalizeStructTag(objectType)],
+			}),
+		);
+		return { commands, resultOffset };
+	}
+
+	// -- Begin builders (custom resolution) -----------------------------------
+	//
+	// `#buildSendRequest` is the front-half shared by the begin flows: resolve the
+	// to/from accounts (creating + sharing any that are missing), mint an `Auth`, and
+	// call `account::send_(balance|object)`. The begin builders return that in-flight
+	// `Request` as the intent's output WITHOUT running issuer templates or `resolve_*`
+	// — the caller owns finalization (e.g. an app-layer settlement pipeline). No policy
+	// is fetched: it's only needed at resolve time, which the caller performs.
+	//
+	// `sendCallArg` is the 4th argument to the send call: an amount pure-input for
+	// balances, or a `Receiving<T>` argument for objects.
+
+	#buildSendRequest(
+		from: string,
+		to: string,
+		sendFunction: 'send_balance' | 'send_object',
+		sendCallArg: Argument,
+		typeArgument: string,
+		baseIdx: number,
+	): { commands: Command[]; requestIdx: number; fromAccountArg: Argument; toAccountArg: Argument } {
+		const fromAccountId = deriveAccountAddress(from, this.#config);
+		const toAccountId = deriveAccountAddress(to, this.#config);
+
+		const [toAccountArg, commands] = this.resolveAccountArg(toAccountId, to, baseIdx);
+		const [fromAccountArg, fromAccountCommands] = this.resolveAccountArg(
+			fromAccountId,
+			from,
+			baseIdx + commands.length,
+		);
+		commands.push(...fromAccountCommands);
+
+		// account::new_auth
+		const authIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'new_auth',
+			}),
+		);
+
+		// account::send_(balance|object) -> Request
+		const requestIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: sendFunction,
+				arguments: [
+					fromAccountArg,
+					{ $kind: 'Result', Result: authIdx },
+					toAccountArg,
+					sendCallArg,
+				],
+				typeArguments: [typeArgument],
+			}),
+		);
+
+		return { commands, requestIdx, fromAccountArg, toAccountArg };
+	}
+
+	buildBeginSendBalance(data: BeginSendBalanceIntentData, baseIdx: number): BuildResult {
+		const { from, to, assetType, amount } = data;
+		const amountArg = this.addTemplateInput(
+			'pure',
+			Inputs.Pure(bcs.u64().serialize(BigInt(amount))),
+		);
+		const { commands, requestIdx } = this.#buildSendRequest(
+			from,
+			to,
+			'send_balance',
+			amountArg,
+			normalizeStructTag(assetType),
+			baseIdx,
+		);
+		return { commands, resultOffset: requestIdx - baseIdx };
+	}
+
+	buildBeginSendObject(data: BeginSendObjectIntentData, baseIdx: number): BuildResult {
+		const { from, to, objectType, object } = data;
+		const { commands, requestIdx } = this.#buildSendRequest(
+			from,
+			to,
+			'send_object',
+			this.receivingArg(object),
+			normalizeStructTag(objectType),
+			baseIdx,
+		);
+		return { commands, resultOffset: requestIdx - baseIdx };
+	}
+
 	// -- Finalization ---------------------------------------------------------
 
 	/**
@@ -658,6 +1114,36 @@ function collectIntentData(commands: readonly Command[]): IntentDataCollection |
 				accountRequests.set(id, { owner: data.owner });
 				break;
 			}
+			case 'sendObject': {
+				const fromId = deriveAccountAddress(data.from, cfg);
+				const toId = deriveAccountAddress(data.to, cfg);
+				objectIds.add(fromId);
+				objectIds.add(toId);
+				objectIds.add(derivePolicyAddress(data.objectType, cfg, { wrapType: (t) => t }));
+				accountRequests.set(fromId, { owner: data.from });
+				accountRequests.set(toId, { owner: data.to });
+				break;
+			}
+			case 'unlockObject':
+			case 'unlockUnrestrictedObject': {
+				const fromId = deriveAccountAddress(data.from, cfg);
+				objectIds.add(fromId);
+				objectIds.add(derivePolicyAddress(data.objectType, cfg, { wrapType: (t) => t }));
+				accountRequests.set(fromId, { owner: data.from });
+				break;
+			}
+			case 'beginSendBalance':
+			case 'beginSendObject': {
+				// Begin flows need only the accounts (created if missing). No policy —
+				// the caller resolves the returned request and supplies the policy then.
+				const fromId = deriveAccountAddress(data.from, cfg);
+				const toId = deriveAccountAddress(data.to, cfg);
+				objectIds.add(fromId);
+				objectIds.add(toId);
+				accountRequests.set(fromId, { owner: data.from });
+				accountRequests.set(toId, { owner: data.to });
+				break;
+			}
 		}
 	}
 
@@ -706,19 +1192,24 @@ async function initializeContext(
 
 	for (const data of intentDataList) {
 		let actionType: PASActionType | null = null;
-		let assetType: string | null = null;
+		let policyId: string | null = null;
 
 		if (data.action === 'sendBalance') {
 			actionType = 'send_funds';
-			assetType = data.assetType;
+			policyId = derivePolicyAddress(data.assetType, config);
 		} else if (data.action === 'unlockBalance') {
 			actionType = 'unlock_funds';
-			assetType = data.assetType;
+			policyId = derivePolicyAddress(data.assetType, config);
+		} else if (data.action === 'sendObject') {
+			actionType = 'send_funds';
+			policyId = derivePolicyAddress(data.objectType, config, { wrapType: (t) => t });
+		} else if (data.action === 'unlockObject') {
+			actionType = 'unlock_funds';
+			policyId = derivePolicyAddress(data.objectType, config, { wrapType: (t) => t });
 		}
 
-		if (!actionType || !assetType) continue;
+		if (!actionType || !policyId) continue;
 
-		const policyId = derivePolicyAddress(assetType, config);
 		const key = `${policyId}:${actionType}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -811,6 +1302,19 @@ const resolvePASIntents: TransactionPlugin = async (transactionData, buildOption
 			case 'unlockBalance':
 			case 'unlockUnrestrictedBalance':
 				result = ctx.buildUnlockBalance(data, index);
+				break;
+			case 'sendObject':
+				result = ctx.buildSendObject(data, index);
+				break;
+			case 'unlockObject':
+			case 'unlockUnrestrictedObject':
+				result = ctx.buildUnlockObject(data, index);
+				break;
+			case 'beginSendBalance':
+				result = ctx.buildBeginSendBalance(data, index);
+				break;
+			case 'beginSendObject':
+				result = ctx.buildBeginSendObject(data, index);
 				break;
 			default:
 				continue;
