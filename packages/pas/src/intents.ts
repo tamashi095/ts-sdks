@@ -110,6 +110,30 @@ type UnlockUnrestrictedObjectIntentData = {
 	cfg: PASPackageConfig;
 };
 
+// "Begin" intents resolve the accounts + `new_auth` + the `account::send_*` call and
+// return the raw `Request` hot potato as their output — running NO issuer templates and
+// NO `resolve_*`. The caller threads the request into a custom finalization (e.g. an
+// app-layer settlement pipeline). If they never resolve it, the Move hot-potato rule
+// makes `tx.build()` fail, exactly as intended.
+
+type BeginSendBalanceIntentData = {
+	action: 'beginSendBalance';
+	from: string;
+	to: string;
+	amount: string;
+	assetType: string;
+	cfg: PASPackageConfig;
+};
+
+type BeginSendObjectIntentData = {
+	action: 'beginSendObject';
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+	cfg: PASPackageConfig;
+};
+
 type PASIntentData =
 	| SendBalanceIntentData
 	| UnlockBalanceIntentData
@@ -117,7 +141,9 @@ type PASIntentData =
 	| AccountForAddressIntentData
 	| SendObjectIntentData
 	| UnlockObjectIntentData
-	| UnlockUnrestrictedObjectIntentData;
+	| UnlockUnrestrictedObjectIntentData
+	| BeginSendBalanceIntentData
+	| BeginSendObjectIntentData;
 
 /**
  * Creates a memoized PAS intent closure. On first call it registers the
@@ -234,6 +260,44 @@ export function unlockUnrestrictedObjectIntent(
 		createPASIntent({
 			action: 'unlockUnrestrictedObject',
 			from,
+			objectType,
+			object,
+			cfg: packageConfig,
+		});
+}
+
+export function beginSendBalanceIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	to: string;
+	amount: number | bigint;
+	assetType: string;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, to, amount, assetType }) =>
+		createPASIntent({
+			action: 'beginSendBalance',
+			from,
+			to,
+			amount: String(amount),
+			assetType,
+			cfg: packageConfig,
+		});
+}
+
+export function beginSendObjectIntent(
+	packageConfig: PASPackageConfig,
+): (options: {
+	from: string;
+	to: string;
+	objectType: string;
+	object: ReceivingObjectInput;
+}) => (tx: Transaction) => TransactionResult {
+	return ({ from, to, objectType, object }) =>
+		createPASIntent({
+			action: 'beginSendObject',
+			from,
+			to,
 			objectType,
 			object,
 			cfg: packageConfig,
@@ -883,6 +947,97 @@ class Resolver {
 		return { commands, resultOffset };
 	}
 
+	// -- Begin builders (custom resolution) -----------------------------------
+	//
+	// `#buildSendRequest` is the front-half shared by the begin flows: resolve the
+	// to/from accounts (creating + sharing any that are missing), mint an `Auth`, and
+	// call `account::send_(balance|object)`. The begin builders return that in-flight
+	// `Request` as the intent's output WITHOUT running issuer templates or `resolve_*`
+	// — the caller owns finalization (e.g. an app-layer settlement pipeline). No policy
+	// is fetched: it's only needed at resolve time, which the caller performs.
+	//
+	// `sendCallArg` is the 4th argument to the send call: an amount pure-input for
+	// balances, or a `Receiving<T>` argument for objects.
+
+	#buildSendRequest(
+		from: string,
+		to: string,
+		sendFunction: 'send_balance' | 'send_object',
+		sendCallArg: Argument,
+		typeArgument: string,
+		baseIdx: number,
+	): { commands: Command[]; requestIdx: number; fromAccountArg: Argument; toAccountArg: Argument } {
+		const fromAccountId = deriveAccountAddress(from, this.#config);
+		const toAccountId = deriveAccountAddress(to, this.#config);
+
+		const [toAccountArg, commands] = this.resolveAccountArg(toAccountId, to, baseIdx);
+		const [fromAccountArg, fromAccountCommands] = this.resolveAccountArg(
+			fromAccountId,
+			from,
+			baseIdx + commands.length,
+		);
+		commands.push(...fromAccountCommands);
+
+		// account::new_auth
+		const authIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: 'new_auth',
+			}),
+		);
+
+		// account::send_(balance|object) -> Request
+		const requestIdx = baseIdx + commands.length;
+		commands.push(
+			TransactionCommands.MoveCall({
+				package: this.#config.packageId,
+				module: 'account',
+				function: sendFunction,
+				arguments: [
+					fromAccountArg,
+					{ $kind: 'Result', Result: authIdx },
+					toAccountArg,
+					sendCallArg,
+				],
+				typeArguments: [typeArgument],
+			}),
+		);
+
+		return { commands, requestIdx, fromAccountArg, toAccountArg };
+	}
+
+	buildBeginSendBalance(data: BeginSendBalanceIntentData, baseIdx: number): BuildResult {
+		const { from, to, assetType, amount } = data;
+		const amountArg = this.addTemplateInput(
+			'pure',
+			Inputs.Pure(bcs.u64().serialize(BigInt(amount))),
+		);
+		const { commands, requestIdx } = this.#buildSendRequest(
+			from,
+			to,
+			'send_balance',
+			amountArg,
+			normalizeStructTag(assetType),
+			baseIdx,
+		);
+		return { commands, resultOffset: requestIdx - baseIdx };
+	}
+
+	buildBeginSendObject(data: BeginSendObjectIntentData, baseIdx: number): BuildResult {
+		const { from, to, objectType, object } = data;
+		const { commands, requestIdx } = this.#buildSendRequest(
+			from,
+			to,
+			'send_object',
+			this.receivingArg(object),
+			normalizeStructTag(objectType),
+			baseIdx,
+		);
+		return { commands, resultOffset: requestIdx - baseIdx };
+	}
+
 	// -- Finalization ---------------------------------------------------------
 
 	/**
@@ -975,6 +1130,18 @@ function collectIntentData(commands: readonly Command[]): IntentDataCollection |
 				objectIds.add(fromId);
 				objectIds.add(derivePolicyAddress(data.objectType, cfg, { wrapType: (t) => t }));
 				accountRequests.set(fromId, { owner: data.from });
+				break;
+			}
+			case 'beginSendBalance':
+			case 'beginSendObject': {
+				// Begin flows need only the accounts (created if missing). No policy —
+				// the caller resolves the returned request and supplies the policy then.
+				const fromId = deriveAccountAddress(data.from, cfg);
+				const toId = deriveAccountAddress(data.to, cfg);
+				objectIds.add(fromId);
+				objectIds.add(toId);
+				accountRequests.set(fromId, { owner: data.from });
+				accountRequests.set(toId, { owner: data.to });
 				break;
 			}
 		}
@@ -1142,6 +1309,12 @@ const resolvePASIntents: TransactionPlugin = async (transactionData, buildOption
 			case 'unlockObject':
 			case 'unlockUnrestrictedObject':
 				result = ctx.buildUnlockObject(data, index);
+				break;
+			case 'beginSendBalance':
+				result = ctx.buildBeginSendBalance(data, index);
+				break;
+			case 'beginSendObject':
+				result = ctx.buildBeginSendObject(data, index);
 				break;
 			default:
 				continue;

@@ -134,6 +134,26 @@ Minting/depositing, clawback, and object-policy registration are issuer-specific
 the generated bindings directly: `account.depositObjectToOwner`, `account.clawbackObject` + your own
 resolve, and `policy.newForObject` (authorized with the package `Publisher`).
 
+### Custom resolution (advanced)
+
+`sendObject`/`sendBalance` auto-resolve the issuer's approval templates and finalize for you. When
+an app needs to drive its **own** approval flow instead — threading the in-flight request through
+bespoke rules — use `client.pas.call.beginSendObject(...)` / `beginSendBalance(...)`. These do only
+the front half (resolve accounts → `new_auth` → `account::send_*`) and return the raw `Request` hot
+potato, running **no** templates and **no** `resolve`. You thread that request through your own
+commands and resolve it yourself; if you don't, `tx.build()` fails on the unresolved hot potato.
+
+```typescript
+const tx = new Transaction();
+const request = tx.add(
+	client.pas.call.beginSendObject({ from, to, objectType: BADGE, object: tx.object('0x...') }),
+);
+// ... thread `request` through your package's commands, then resolve it (e.g. `send_funds::resolve_object`).
+```
+
+`client.pas.deriveObjectPolicyAddress(objectType)` returns the `Policy<T>` id for an object type,
+for flows that need it at resolve time.
+
 ## More resources
 
 - [PAS repository](https://github.com/MystenLabs/pas) — Move contracts, architecture docs, and a
