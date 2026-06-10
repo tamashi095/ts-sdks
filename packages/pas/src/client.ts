@@ -14,8 +14,11 @@ import { PASClientError } from './error.js';
 import {
 	accountForAddressIntent,
 	sendBalanceIntent,
+	sendObjectIntent,
 	unlockBalanceIntent,
+	unlockObjectIntent,
 	unlockUnrestrictedBalanceIntent,
+	unlockUnrestrictedObjectIntent,
 } from './intents.js';
 import type { PASClientConfig, PASOptions, PASPackageConfig } from './types.js';
 
@@ -168,6 +171,44 @@ export class PASClient {
 			 * @returns A sync closure `(tx: Transaction) => TransactionResult` (the account)
 			 */
 			accountForAddress: accountForAddressIntent(this.#packageConfig),
+
+			/**
+			 * Creates a send-object intent — the object analog of `sendBalance`. At build
+			 * time it auto-resolves the issuer's `send_funds` approval template and the
+			 * object's `Receiving<T>` reference. If the recipient account does not exist it
+			 * is created and shared automatically.
+			 *
+			 * @param options.from - The sender's address (owner of the source account)
+			 * @param options.to - The receiver's address (owner of the destination account)
+			 * @param options.objectType - The full object type (e.g. "0xabc::permissioned_nft::Badge")
+			 * @param options.object - The object to send, as a receiving argument: `tx.object(id)` or `tx.receivingRef(ref)`. Must live in the sender's account.
+			 * @returns A sync closure `(tx: Transaction) => TransactionResult`
+			 */
+			sendObject: sendObjectIntent(this.#packageConfig),
+
+			/**
+			 * Creates an unlock-object intent for a managed object type — the object analog
+			 * of `unlockBalance`. Resolves the issuer's `unlock_funds` approval template;
+			 * fails if the issuer has not configured unlock approvals for the type.
+			 *
+			 * @param options.from - The owner of the source account
+			 * @param options.objectType - The full object type
+			 * @param options.object - The object to unlock, as a receiving argument: `tx.object(id)` or `tx.receivingRef(ref)`
+			 * @returns A sync closure `(tx: Transaction) => TransactionResult` (the unlocked object)
+			 */
+			unlockObject: unlockObjectIntent(this.#packageConfig),
+
+			/**
+			 * Creates an unlock-object intent for an unmanaged (no-policy) object type — the
+			 * object analog of `unlockUnrestrictedBalance`. Use this to retrieve an object of
+			 * a type that has no `Policy<T>` (e.g. one airdropped into your account).
+			 *
+			 * @param options.from - The owner of the source account
+			 * @param options.objectType - The full object type
+			 * @param options.object - The object to unlock, as a receiving argument: `tx.object(id)` or `tx.receivingRef(ref)`
+			 * @returns A sync closure `(tx: Transaction) => TransactionResult` (the unlocked object)
+			 */
+			unlockUnrestrictedObject: unlockUnrestrictedObjectIntent(this.#packageConfig),
 		};
 	}
 }
