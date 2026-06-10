@@ -74,6 +74,43 @@ export function newForCurrency(options: NewForCurrencyOptions) {
 			typeArguments: options.typeArguments,
 		});
 }
+export interface NewForObjectArguments {
+	namespace: RawTransactionArgument<string>;
+	publisher: RawTransactionArgument<string>;
+	clawbackAllowed: RawTransactionArgument<boolean>;
+}
+export interface NewForObjectOptions {
+	package?: string;
+	arguments:
+		| NewForObjectArguments
+		| [
+				namespace: RawTransactionArgument<string>,
+				publisher: RawTransactionArgument<string>,
+				clawbackAllowed: RawTransactionArgument<boolean>,
+		  ];
+	typeArguments: [string];
+}
+/**
+ * Create a policy for a generic object type `T`.
+ *
+ * Unlike currencies (which prove authority via a `TreasuryCap`), object types have
+ * no mint capability. Authority is instead proven with the `Publisher` of the
+ * package that defines `T` — mirroring `sui::transfer_policy::new`. Only the
+ * package that defines `T` can register a policy for it.
+ */
+export function newForObject(options: NewForObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null, 'bool'] satisfies (string | null)[];
+	const parameterNames = ['namespace', 'publisher', 'clawbackAllowed'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'policy',
+			function: 'new_for_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
 export interface ShareArguments {
 	policy: RawTransactionArgument<string>;
 }

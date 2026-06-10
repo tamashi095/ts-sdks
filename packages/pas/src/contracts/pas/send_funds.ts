@@ -172,3 +172,33 @@ export function resolveBalance(options: ResolveBalanceOptions) {
 			typeArguments: options.typeArguments,
 		});
 }
+export interface ResolveObjectArguments {
+	request: TransactionArgument;
+	policy: RawTransactionArgument<string>;
+}
+export interface ResolveObjectOptions {
+	package?: string;
+	arguments:
+		| ResolveObjectArguments
+		| [request: TransactionArgument, policy: RawTransactionArgument<string>];
+	typeArguments: [string];
+}
+/**
+ * Resolve a transfer request for a generic object, if there are enough approvals.
+ *
+ * The object is deposited into the recipient's account address, keeping it within
+ * the permissioned system.
+ */
+export function resolveObject(options: ResolveObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null] satisfies (string | null)[];
+	const parameterNames = ['request', 'policy'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'send_funds',
+			function: 'resolve_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}

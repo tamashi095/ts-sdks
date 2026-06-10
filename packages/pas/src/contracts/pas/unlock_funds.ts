@@ -125,6 +125,37 @@ export function resolveUnrestrictedBalance(options: ResolveUnrestrictedBalanceOp
 			typeArguments: options.typeArguments,
 		});
 }
+export interface ResolveUnrestrictedObjectArguments {
+	request: TransactionArgument;
+	namespace: RawTransactionArgument<string>;
+}
+export interface ResolveUnrestrictedObjectOptions {
+	package?: string;
+	arguments:
+		| ResolveUnrestrictedObjectArguments
+		| [request: TransactionArgument, namespace: RawTransactionArgument<string>];
+	typeArguments: [string];
+}
+/**
+ * The object equivalent of `resolve_unrestricted_balance`.
+ *
+ * Enables unlocking objects that are not managed by a Policy within the system. If
+ * a `Policy<T>` exists, the object can only be resolved from within the system via
+ * the managed `resolve` below.
+ */
+export function resolveUnrestrictedObject(options: ResolveUnrestrictedObjectOptions) {
+	const packageAddress = options.package ?? '@mysten/pas';
+	const argumentsTypes = [null, null] satisfies (string | null)[];
+	const parameterNames = ['request', 'namespace'];
+	return (tx: Transaction) =>
+		tx.moveCall({
+			package: packageAddress,
+			module: 'unlock_funds',
+			function: 'resolve_unrestricted_object',
+			arguments: normalizeMoveArguments(options.arguments, argumentsTypes, parameterNames),
+			typeArguments: options.typeArguments,
+		});
+}
 export interface ResolveArguments {
 	request: TransactionArgument;
 	policy: RawTransactionArgument<string>;
